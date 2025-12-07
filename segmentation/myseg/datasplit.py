@@ -1,12 +1,11 @@
 import os
 import time
 import numpy as np
-import torch
-from torchvision import datasets, transforms
+# import torch
+# from torchvision import datasets, transforms
 from myseg.dataloader import *
 from myseg.dataloader_camvid import CamVid_Dataset
 from myseg.tv_transform import get_transform
-
 
 def get_dataset_cityscapes(args):
     """
@@ -15,7 +14,6 @@ def get_dataset_cityscapes(args):
     the keys are the user index and the values are the corresponding data for
     each of those users.
     """
-
 
     if args.dataset == 'cityscapes':
 
@@ -51,7 +49,6 @@ def get_dataset_camvid(args):
     each of those users.
     """
 
-
     if args.dataset == 'camvid':
 
         if args.data == 'train':
@@ -70,7 +67,6 @@ def get_dataset_camvid(args):
 
     return train_dataset, test_dataset, user_groups
 
-
 def get_dataset_ade20k(args):
     """
     cityscapes dataset:
@@ -78,7 +74,6 @@ def get_dataset_ade20k(args):
     the keys are the user index and the values are the corresponding data for
     each of those users.
     """
-
 
     if args.dataset == 'ade20k' or args.dataset =='voc':
 
@@ -106,7 +101,6 @@ def cityscapes_iid(dataset, num_users):
                                              replace=False)) # replace=False:不重复选择
         all_idxs = list(set(all_idxs) - dict_users[i])
     return dict_users
-
 
 def cityscapes_noniid(num_users):
     """
@@ -192,7 +186,6 @@ def cityscapes_noniid_extend(root_dir, train_folder, num_users):
 
     return dict_users
 
-
 def get_city_num(root_dir, train_folder):
     city_names = sorted(os.listdir(os.path.join(root_dir, train_folder))) # sorted:按字母顺序排序
     print("city_names: ", city_names)
@@ -208,7 +201,6 @@ def get_city_num(root_dir, train_folder):
 
     print("city_lens: ", city_lens)
     return city_lens
-
 
 if __name__ == '__main__':
     root_dir = '/home/fll/leo_test/data/cityscapes'
@@ -235,8 +227,3 @@ if __name__ == '__main__':
         print("data_sum: ", data_sum)
 
     print_user_groups(user_groups)
-
-
-
-
-

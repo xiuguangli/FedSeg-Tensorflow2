@@ -1,5 +1,7 @@
 import copy
-import torch
+import numpy as np
+# import torch
+import tensorflow as tf
 
 
 
@@ -11,29 +13,28 @@ class EMA():
         self.backup = {}
 
     def register(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
+        for var in self.model.trainable_variables:
+            self.shadow[var.name] = var.numpy().copy()
 
     def update(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                assert name in self.shadow
-                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
-                self.shadow[name] = new_average.clone()
+        for var in self.model.trainable_variables:
+            name = var.name
+            if name in self.shadow:
+                new_average = (1.0 - self.decay) * var.numpy() + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.copy()
 
     def apply_shadow(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                assert name in self.shadow
-                self.backup[name] = param.data
-                param.data = self.shadow[name]
+        for var in self.model.trainable_variables:
+            name = var.name
+            if name in self.shadow:
+                self.backup[name] = var.numpy().copy()
+                var.assign(self.shadow[name])
 
     def restore(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                assert name in self.backup
-                param.data = self.backup[name]
+        for var in self.model.trainable_variables:
+            name = var.name
+            if name in self.backup:
+                var.assign(self.backup[name])
         self.backup = {}
 
 # 初始化
@@ -54,15 +55,50 @@ class EMA():
 
 
 
-def average_weights(w):
+def average_weights0(w):
     """
     Returns the average of the weights.
+    w: list of dicts of numpy arrays or tf.Tensor
     """
     w_avg = copy.deepcopy(w[0])
     for key in w_avg.keys():
         for i in range(1, len(w)):
             w_avg[key] += w[i][key]
-        w_avg[key] = torch.div(w_avg[key], len(w))
+        w_avg[key] = w_avg[key] / len(w)
+    return w_avg
+
+def average_weights(w):
+    """
+    Returns the average of the weights.
+    w: list of dicts of numpy arrays or tf.Tensor
+    """
+    w_avg = copy.deepcopy(w[0])
+    for i in range(len(w_avg)):
+        # 1. 获取所有客户端在第 i 层的权重
+        layer_weights_across_clients = [client_w[i] for client_w in w]
+        
+        # 2. 计算平均值 (axis=0 表示在客户端维度上平均)
+        # np.mean 可以直接对堆叠的数组求平均
+        w_avg[i] = np.mean(layer_weights_across_clients, axis=0)
+        
+    return w_avg
+
+def get_weights_dict(model):
+    # model.trainable_variables 包含名字和值
+    return {v.name: v.numpy() for v in model.trainable_variables}
+
+def weighted_average_weights(w, client_dataset_len):
+    """
+    Returns the weighted average of the weights.
+
+    client_dataset_len: a list of the length of the client dataset
+    """
+    w_avg = copy.deepcopy(w[0])
+    for key in w_avg.keys():
+        w_avg[key] = w_avg[key] * client_dataset_len[0]
+        for i in range(1, len(w)):
+            w_avg[key] += w[i][key] * client_dataset_len[i]
+        w_avg[key] = w_avg[key] / sum(client_dataset_len)
     return w_avg
 
 
@@ -73,13 +109,12 @@ def weighted_average_weights(w, client_dataset_len):
     client_dataset_len: a list of the length of the client dataset
     """
     w_avg = copy.deepcopy(w[0])
-    for key in w_avg.keys():
-        w_avg[key] = torch.mul(w_avg[key], client_dataset_len[0])  # w[0][key] * client_dataset_len[0]
-        for i in range(1, len(w)):
-            w_avg[key] += torch.mul((w[i][key]), client_dataset_len[i])  # w[i][key] * client_dataset_len[i]
-        w_avg[key] = torch.div(w_avg[key], sum(client_dataset_len))
+    for i in range(len(w_avg)):
+        w_avg[i] = w_avg[i] * client_dataset_len[0]
+        for j in range(1, len(w)):
+            w_avg[i] += w[j][i] * client_dataset_len[j]
+        w_avg[i] = w_avg[i] / sum(client_dataset_len)
     return w_avg
-
 
 def exp_details(args):
     print('\nExperimental details:')

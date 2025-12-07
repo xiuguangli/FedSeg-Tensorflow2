@@ -1,27 +1,40 @@
+from ast import arg
+
+from torch import le
+from options import args_parser
+args = args_parser()
+
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import copy
 import time
 import pickle
 #import wandb
-import torch.nn.functional as F
+# import torch.nn.functional as F
 import numpy as np
-from torch import nn
+# from torch import nn
+import tensorflow as tf
 from tqdm import tqdm
+import concurrent.futures
+from box import Box
 
-import torch
-from torch.utils.data import DataLoader
+# import torch
+# from torch.utils.data import DataLoader
 
-from options import args_parser
 from update import LocalUpdate, test_inference
 from utils import average_weights, weighted_average_weights, exp_details,EMA
 from eval_utils import evaluate
+from utils import get_weights_dict
+from myseg.bisenetv2 import BiSeNetV2
 
-
-from sklearn.cluster import KMeans
-from scipy.optimize  import linear_sum_assignment
+# from sklearn.cluster import KMeans
+# from scipy.optimize  import linear_sum_assignment
 
 from myseg.datasplit import get_dataset_cityscapes,get_dataset_camvid,get_dataset_ade20k
 from myseg.bisenet_utils import set_model_bisenetv2
+from myseg.magic import create_tf_dataloader_from_custom_dataset_test
 
 import warnings
 warnings.filterwarnings("ignore") # 忽略warning
@@ -77,16 +90,84 @@ def init_wandb(args, wandb_id, project_name='myseg'):
         print("wandb not init")
 
 
+
+    
+def setup_local_updates_parallel(args, train_dataset, user_groups):
+    def init_local_update(user_id, args, train_dataset, user_groups):
+        """
+        一个用于在单独线程中执行 LocalUpdate 初始化的函数。
+        """
+        # local_updater = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[user_id])
+        # return user_id, local_updater
+        # 确保 LocalUpdate 可以在多线程环境中安全运行
+        try:
+            local_updater = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[user_id])
+            return user_id, local_updater
+        except Exception as e:
+            print(f"Error initializing LocalUpdate for user {user_id}: {e}")
+            return user_id, None # 返回 None 表示失败
+    
+    
+    # 存储所有 LocalUpdate 实例的字典
+    local_updaters = {}
+    
+    # 确定最大工作线程数。通常是 CPU 核心数或一个经验值。
+    max_workers = min(args.num_users, os.cpu_count() * 2) / 2
+    # max_workers = 2
+    print(f"Using up to {max_workers} threads for LocalUpdate initialization.")
+    
+    # 使用 ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        
+        # 提交所有用户的初始化任务
+        # map() 会按提交顺序返回结果
+        futures = {executor.submit(init_local_update, k, args, train_dataset, user_groups): k 
+                   for k in range(args.num_users)}
+        
+        # 使用 tqdm 监控进度
+        results = []
+        for future in tqdm(
+            concurrent.futures.as_completed(futures), 
+            total=args.num_users, 
+            desc="Initializing Local Updates",
+            leave=False
+        ):
+            user_id, local_updater = future.result()
+            
+            if local_updater is not None:
+                local_updaters[user_id] = local_updater
+            
+    # 排序并返回 LocalUpdate 列表 (如果需要)
+    sorted_updaters = [local_updaters[k] for k in sorted(local_updaters.keys())]
+    return sorted_updaters
+
+
+
 if __name__ == '__main__':
+    # -------------------------------------------------------------
+    # 关键设置：启用内存增长
+    # -------------------------------------------------------------
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    tf.config.optimizer.set_jit(False) 
+    if gpus:
+        try:
+            # 限制 GPU 内存增长，让 TensorFlow 只在需要时分配内存
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("TensorFlow 已启用内存增长模式 (set_memory_growth=True)。")
+        except RuntimeError as e:
+            # 必须在程序启动时设置
+            print(e)
     args = args_parser()
 
     start_time = time.time()
     exp_details(args)
 
-    torch.cuda.set_device(int(args.gpu))
+    # torch.cuda.set_device(int(args.gpu))
 
-    torch.manual_seed(args.seed)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # torch.manual_seed(args.seed)
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if tf.config.list_physical_devices('GPU') else 'cpu'
     print('device: ' + device)
 
     # load dataset and user groups
@@ -101,40 +182,22 @@ if __name__ == '__main__':
     else:
         exit('Error: unrecognized dataset')
 
-    test_loader = DataLoader(test_dataset, batch_size=1, num_workers=args.num_workers, shuffle=False, pin_memory=True) # for global model test
+    # test_loader = DataLoader(test_dataset, batch_size=1, num_workers=args.num_workers, shuffle=False, pin_memory=True) # for global model test
+    test_loader = create_tf_dataloader_from_custom_dataset_test(test_dataset)
 
     # BUILD MODEL
     global_model = make_model(args)
+    _ = global_model(train_dataset[0][0][None, ...], training=False)  # 模型build，指定输入shape
+    
 
-    # print global_model
-    # from torchinfo import summary
-    # print(global_model) # 根据__init__的参数顺序，输出网络结构
-    # summary(global_model, input_size=(1, 3, 512, 1024), device='cpu', depth=5)
-    # exit()
+    start_ep = 0
+    wandb_id = None
 
-    # Set the model to train and send it to device.
-    global_model.to(device)
-    global_model.train()
+    # test_acc, test_iou, confmat = test_inference(args, global_model, test_loader)
+    # print(confmat)
+    # exit(0)
 
-    # copy weights
-    global_weights = global_model.state_dict()
-
-    # resume from checkpoint
-    #args.checkpoint = "fed_train_bisenetv2_c19_e1500_frac[0.035]_iid[1]_E[2]_B[8]_lr[0.05]_acti[relu]_users[144]_opti[sgd]_sche[lambda].pth"
-    if args.checkpoint != "":
-        checkpoint = torch.load(
-            os.path.join(args.root, 'save/checkpoints', args.checkpoint),
-            map_location=device)
-        global_model.load_state_dict(checkpoint['model'])
-        start_ep = checkpoint['epoch'] + 1
-        wandb_id = checkpoint['wandb_id']
-        print("resume from: ", args.checkpoint)
-    else:
-        # a new run
-        start_ep = 0
-        wandb_id = None
-
-
+    
     # wandb可视化 init
     if args.USE_WANDB:
         init_wandb(args, wandb_id, project_name='Fedavg_seg')
@@ -152,149 +215,83 @@ if __name__ == '__main__':
     ## Global rounds / Training
     print('\nTraining global model on {} of {} users locally for {} epochs'.format(args.frac_num, args.num_users, args.epochs))
     train_loss, local_test_accuracy, local_test_iou = [], [], []
-    # weights = [] # comment off for checking weights update
 
-
-#    if args.is_proto:
-
-#        if not args.mom_update:
-#            localmem_dic = {}
-#            proto_mask_dic = {}
-
-#        if args.kmean_num>0:
-#            prototypes_mem = torch.randn((args.num_classes,args.num_users,args.kmean_num,args.proj_dim)).to('cuda:'+str(args.gpu))
-#        else:
-#            prototypes_mem = torch.randn((args.num_classes,args.num_users,args.proj_dim)).to('cuda:'+str(args.gpu))
-
-#        proto_mask = torch.zeros((args.num_classes,args.num_users)).to('cuda:'+str(args.gpu))
-
-    if args.globalema:
+    if args.globalema:  # False
         ema = EMA(global_model, args.momentum)
         ema.register()
-#        prototypes = torch.randn((args.num_classes,args.proto_dim)).to('cuda:'+str(args.gpu))
+        # TensorFlow下原型初始化请用np或tf实现
+        # prototypes = np.random.randn(args.num_classes, args.proto_dim)
 
+    # 创建客户端
+    print(f'Creating clients {args.num_users}...')
+    local_updaters = setup_local_updates_parallel(args, train_dataset, user_groups)
+    print('Clients created.')
+        
     IoU_record =[]
     Acc_record = []
+    train_client_set = set()
     for epoch in range(start_ep, args.epochs):
         local_weights, local_losses = [], []
         client_dataset_len = [] # for non-IID weighted_average_weights
         print('\n\n| Global Training Round : {} |'.format(epoch))
 
+        if len(train_client_set) == args.num_users:
+            print("All clients have been selected for training in this epoch.!!!!!!")
+        
         if args.globalema:
             ema.apply_shadow()
             global_model = ema.model
-        global_model.train()
+        # global_model.train()  # Keras模型训练模式自动管理
         # m = max(int(args.frac * args.num_users), 1)
         # idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         idxs_users = np.random.choice(range(args.num_users), int(args.frac_num), replace=False) # 直接指定frac_num个local user
+        # idxs_users = np.random.choice(range(args.num_users), int(args.num_users), replace=False) # 直接指定frac_num个local user
+        train_client_set.update(idxs_users.tolist())
        # #local_train_start_time = time.time()
         # Local training
-
-#        if args.is_proto:
-
-
-        #    if args.localmem and args.mom_update:
-        #        localmem_dic = {}
-        #        proto_mask_dic = {}
-             
-#
-#            if args.localmem and epoch >= args.proto_start_epoch:
-#                print('Extracting prototypes...')
-#                for idx in idxs_users:
-#                    print('\nUser idx : ' + str(idx))
-#                    local_model = LocalUpdate(args=args, dataset=train_dataset,
-#                                          idxs=user_groups[idx])
-#                    proto_tmp,label_list,label_mask_ = local_model.get_protos(model=copy.deepcopy(global_model),
-#                                                     global_round=epoch)
-#                    for cls_num in range(args.num_classes):
-#                        if cls_num in label_list:
-#                            proto_t_ = proto_tmp[cls_num]
-#                            if args.kmean_num>0:
-#                                proto_t_ = proto_t_.to(device)
-#                                proto_t_ = F.normalize(proto_t_,2)
-#
-#                                if idx not in localmem_dic:
-#                                    proto_mask_dic[idx] = label_mask_
-#                                    localmem_dic[idx]=proto_tmp.detach()    
-#                                else:
-#                                    if args.mom_update:
-#                                        old_proto =  localmem_dic[idx][cls_num]
-#  
-#
-#                                        localmem_dic[idx][cls_num]=args.momentum * old_proto + (1-args.momentum) * proto_t_.detach()
-#                                        proto_mask_dic[idx] = (label_mask_+proto_mask_dic[idx])>0
-#
-#                                    else:
-#                                        localmem_dic[idx][cls_num]=proto_t_.detach()    
-#                                        proto_mask_dic[idx] = label_mask_
-#
-#
-#
-#                            else:
-#                                proto_t_ = proto_t_.mean(0,keepdim=True)
-#                                proto_t_ = F.normalize(proto_t_,dim=1)
-#
-#                                if idx not in localmem_dic:
-#                                    localmem_dic[idx]= torch.randn((args.num_classes,args.proj_dim)).to('cuda:'+str(args.gpu))
-#                                    proto_mask_dic[idx] = torch.zeros((args.num_classes)).to('cuda:'+str(args.gpu))
-#                                    localmem_dic[idx][cls_num]=proto_t_.detach()    
-#                                else:
-#
-#                                    if args.mom_update:
-#
-#                                        if  proto_mask_dic[idx][cls_num]==0:
-#                                            localmem_dic[idx][cls_num]=proto_t_.detach()
-#                                        else:
-#                                            old_proto =  localmem_dic[idx][cls_num]
-#                                            new_proto = proto_t_
-#                                            localmem_dic[idx][cls_num]=args.momentum * old_proto + (1-args.momentum) * new_proto.detach()
-#                                    else:
-#                                        localmem_dic[idx][cls_num]=proto_t_.detach()
-#
-#                                proto_mask_dic[idx][cls_num]=1
-#
-#            print('Extracting prototypes finished')
-
         print('local update')
-        for idx in idxs_users:
-
+        # idxs_users = [0]
+        for idx in sorted(idxs_users):
             print('\nUser idx : ' + str(idx))
 
-            local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                      idxs=user_groups[idx])
-
+            # local_model = LocalUpdate(args=args, dataset=train_dataset,idxs=user_groups[idx])
+            local_model: LocalUpdate = local_updaters[idx]
+            # print('Extracting prototypes...')
+            # proto_tmp,label_list,label_mask_ = local_model.get_protos(model=copy.deepcopy(global_model),global_round=epoch)
+            # exit(0)
+            # continue
             
             if not args.is_proto:
                 local_mem = None
                 local_mask = None
-
             else:
                 if args.localmem and epoch >= args.proto_start_epoch:
-
-
                     print('Extracting prototypes...')
-                    proto_tmp,label_list,label_mask_ = local_model.get_protos(model=copy.deepcopy(global_model),
-                                                     global_round=epoch)
+                    proto_tmp,label_list,label_mask_ = local_model.get_protos(model=copy.deepcopy(global_model),global_round=epoch)
 
                     if args.kmean_num>0:
-                        proto_tmp = F.normalize(proto_tmp,dim=2)
+                        # proto_tmp = F.normalize(proto_tmp,dim=2)
+                        proto_tmp = proto_tmp / (np.linalg.norm(proto_tmp, axis=2, keepdims=True) + 1e-8)
                     
                     else:
                         proto_tmp = proto_tmp.mean(0)
-                        proto_tmp = F.normalize(proto_tmp,dim=1)
+                        # proto_tmp = F.normalize(proto_tmp,dim=1)
+                        proto_tmp = proto_tmp / (np.linalg.norm(proto_tmp, axis=1, keepdims=True) + 1e-8)
                         label_mask_ = label_mask_.sum(0)>0
-
-
-
 
                     local_mem=proto_tmp
                     local_mask = label_mask_
                 else:
                     local_mem = None
                     local_mask = None
-            w, loss = local_model.update_weights(model=copy.deepcopy(global_model),
-                                                global_round=epoch,prototypes = local_mem,proto_mask = local_mask)
-
+            # t0 = time.time()
+            model1 = copy.deepcopy(global_model)
+            global_model.trainable = False
+            w, loss = local_model.update_weights(model=model1,global_round=epoch,prototypes = local_mem,proto_mask = local_mask,global_model=global_model)
+            global_model.trainable = True
+            # print("Time consumed for local update: {:.2f}s".format(time.time() - t0))
+            # exit()
+            
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss))
             client_dataset_len.append(len(user_groups[idx])) # for non-IID weighted_average_weights
@@ -324,70 +321,27 @@ if __name__ == '__main__':
             print('using weighted_average_weights')
             global_weights = weighted_average_weights(local_weights, client_dataset_len)
 
-
-        if args.globalema:
-            ema.model.load_state_dict(global_weights)
-            ema.update()
-        else:
-            global_model.load_state_dict(global_weights)    
-
-
-        # weights.append(global_weights)# comment off for checking weights update
-
+        global_model.set_weights(global_weights)
+        
         # save global model to checkpoint                 
         if (epoch+1) % args.save_frequency == 0 or epoch == args.epochs-1:
-            torch.save(
-                {
-                    'model': global_model.state_dict(),
-                    'epoch': epoch,
-                    'exp_name': exp_name,
-                    'wandb_id': wandb_id
-                },
-                os.path.join(args.root, 'save/checkpoints', exp_name+'.pth')
-            )
+            os.makedirs(os.path.join(args.root, 'save/checkpoints'), exist_ok=True)
+            # torch.save(
+            #     {
+            #         'model': global_model.state_dict(),
+            #         'epoch': epoch,
+            #         'exp_name': exp_name,
+            #         'wandb_id': wandb_id
+            #     },
+            #     os.path.join(args.root, 'save/checkpoints', exp_name+'.pth')
+            # )
+            # print('\nGlobal model weights save to checkpoint')
+            global_model.save_weights(os.path.join(args.root, 'save/checkpoints', exp_name+'.weights.h5'))
             print('\nGlobal model weights save to checkpoint')
         # torch.save(weights, 'weights.pt')# comment off for checking weights update
 
 
-        # ----------------------------下面的全是evaluate部分----------------------------
-        global_model.eval()
-
-        # origin : Calculate avg test accuracy over train data of a fraction of users at every epoch
-        # my code : Calculate avg accuracy over LOCAL train data of users in [idxs_users] trained already at every 'local_test_frequency' epoch
-        #           print global training loss on train set after every 'local_test_frequency' rounds
-        if (epoch+1) % args.local_test_frequency == 0:
-            local_test_start_time = time.time()
-            # test_users = int(args.local_test_frac * args.num_users)
-            # print('Testing global model on {} users'.format(test_users))
-            print('\nTesting global model on 50% of train dataset on {} Local users after {} epochs'.format(len(idxs_users), epoch+1))
-            list_acc, list_iou = [], []
-
-            # for c in tqdm(range(test_users)):
-            for idx in idxs_users:
-                local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                          idxs=user_groups[idx])
-                print("\nLocal Test user idx: {}".format(idx))
-                print("user_groups[idx]: {}".format(user_groups[idx]))
-                acc, iou, confmat = local_model.inference(model=global_model)
-                print(confmat) # 输出太多，不在最终log中打印
-                list_acc.append(acc)
-                list_iou.append(iou)
-            local_test_accuracy.append(sum(list_acc) / len(list_acc))
-            local_test_iou.append(sum(list_iou) / len(list_iou))
-
-            print('\nLocal test Stats after {} global rounds:'.format(epoch+1))
-            print('Training Avg Loss : {:.6f}'.format(np.mean(np.array(train_loss)))) # 历史平均值
-            print('Local Test Accuracy: {:.2f}% '.format(local_test_accuracy[-1]))
-            print('Local Test IoU: {:.2f}%'.format(local_test_iou[-1]))
-            print('Local Test Run Time: {:.2f}s\n'.format((time.time()-local_test_start_time)))
-
-            try:
-                wandb.log({'train_acc': local_test_accuracy[-1]}, commit=False, step=epoch+1)
-                wandb.log({'train_MIOU': local_test_iou[-1]}, commit=False, step=epoch+1)
-            except:
-                pass
-
-
+        # ----------------------------下面的evaluate部分----------------------------
         # Evaluate GLOBAL model on test dataset every 'global_test_frequency' rounds
         if not args.train_only and (epoch+1) % args.global_test_frequency == 0:
             print('\n*******************************************') # use * to mark the Evaluation of GLOBAL model on TEST dataset
@@ -421,28 +375,3 @@ if __name__ == '__main__':
     print("|---- Global Test IoU: {:.2f}%".format(sum(IoU_record[-5:])/5.))
     print('@'*100)
 
-    # Plot Loss curve
-    # if args.epochs > 1:
-    #     # Plot Training Loss vs Communication rounds (train_loss)
-    #     plt.figure()
-    #     plt.title('Training Loss vs Communication rounds')
-    #     plt.plot(range(len(train_loss)), train_loss, color='r')
-    #     plt.ylabel('Training loss')
-    #     plt.xlabel('Communication Rounds')
-    #     plt.savefig(os.path.join(args.root, 'save/training_curves', exp_name+'_loss.png'))
-    #
-    #     # Plot Average Accuracy vs Communication rounds (local_test_accuracy, local_test_iou)
-    #     plt.figure()
-    #     plt.title('Average Accuracy vs Communication rounds')
-    #     plt.plot(range(len(local_test_accuracy)), local_test_accuracy, color='k', label='local test accuracy')
-    #     plt.plot(range(len(local_test_iou)), local_test_iou, color='b', label='local test IoU')
-    #     plt.ylabel('Average Accuracy')
-    #     plt.xlabel('Communication Rounds')
-    #     plt.legend()
-    #     plt.savefig(os.path.join(args.root, 'save/training_curves', exp_name+'_metrics.png'))
-
-    # Logging
-    # filename = os.path.join(args.root, 'save/logs', exp_name+'_log.txt')
-    # with open(filename, 'w') as w:
-    #     for line in log:
-    #         w.write(line + '\n')

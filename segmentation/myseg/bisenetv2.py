@@ -1,187 +1,220 @@
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.model_zoo as modelzoo
-import math
+import tensorflow as tf
+from keras.saving import register_keras_serializable 
 
 backbone_url = 'https://github.com/CoinCheung/BiSeNet/releases/download/0.0.0/backbone_v2.pth'
 
-
-class ConvBNReLU(nn.Module):
-
+@register_keras_serializable()
+class ConvBNReLU(tf.keras.layers.Layer):
     def __init__(self, in_chan, out_chan, ks=3, stride=1, padding=1,
-                 dilation=1, groups=1, bias=False):
-        super(ConvBNReLU, self).__init__()
-        self.conv = nn.Conv2d(
-                in_chan, out_chan, kernel_size=ks, stride=stride,
-                padding=padding, dilation=dilation,
-                groups=groups, bias=bias)
-        self.bn = nn.BatchNorm2d(out_chan)
-        self.relu = nn.ReLU(inplace=True)
+                 dilation=1, groups=1, use_bias=False):
+        super().__init__()
+        
+        self.in_chan = in_chan
+        self.out_chan = out_chan
+        self.ks = ks
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        self.use_bias = use_bias
+        
+        self.conv = tf.keras.layers.Conv2D(
+            out_chan, ks, strides=stride, padding='same' if padding > 0 else 'valid',
+            dilation_rate=dilation, groups=groups, use_bias=use_bias)
+        self.bn = tf.keras.layers.BatchNormalization(axis=1)
+        self.relu = tf.keras.layers.ReLU()
 
-    def forward(self, x):
+    def call(self, x):
         feat = self.conv(x)
         feat = self.bn(feat)
         feat = self.relu(feat)
         return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'in_chan': self.in_chan,
+            'out_chan': self.out_chan,
+            'ks': self.ks,  
+            'stride': self.stride,
+            'padding': self.padding,
+            'dilation': self.dilation,
+            'groups': self.groups,
+            'use_bias': self.use_bias,
+        })
+        return config
 
-
-class UpSample(nn.Module):
-
+@register_keras_serializable()
+class UpSample(tf.keras.layers.Layer):
     def __init__(self, n_chan, factor=2):
-        super(UpSample, self).__init__()
+        super().__init__()
         out_chan = n_chan * factor * factor
-        self.proj = nn.Conv2d(n_chan, out_chan, 1, 1, 0)
-        self.up = nn.PixelShuffle(factor)
-        self.init_weight()
+        
+        self.n_chan = n_chan
+        self.factor = factor
+        self.out_chan = out_chan
+        
+        self.proj = tf.keras.layers.Conv2D(out_chan, 1, strides=1, padding='valid')
+        self.up = tf.keras.layers.Lambda(lambda x: tf.nn.depth_to_space(x, factor))
 
-    def forward(self, x):
+    def call(self, x):
         feat = self.proj(x)
         feat = self.up(feat)
         return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'n_chan': self.n_chan,
+            'factor': self.factor,
+            'out_chan': self.out_chan,
+        })
+        return config
 
-    def init_weight(self):
-        nn.init.xavier_normal_(self.proj.weight, gain=1.)
-
-
-
-class DetailBranch(nn.Module):
-
+@register_keras_serializable()
+class DetailBranch(tf.keras.layers.Layer):
     def __init__(self):
-        super(DetailBranch, self).__init__()
-        self.S1 = nn.Sequential(
+        super().__init__()
+        self.S1 = tf.keras.Sequential([
             ConvBNReLU(3, 64, 3, stride=2),
             ConvBNReLU(64, 64, 3, stride=1),
-        )
-        self.S2 = nn.Sequential(
+        ])
+        self.S2 = tf.keras.Sequential([
             ConvBNReLU(64, 64, 3, stride=2),
             ConvBNReLU(64, 64, 3, stride=1),
             ConvBNReLU(64, 64, 3, stride=1),
-        )
-        self.S3 = nn.Sequential(
+        ])
+        self.S3 = tf.keras.Sequential([
             ConvBNReLU(64, 128, 3, stride=2),
             ConvBNReLU(128, 128, 3, stride=1),
             ConvBNReLU(128, 128, 3, stride=1),
-        )
+        ])
 
-    def forward(self, x):
+    def call(self, x):
         feat = self.S1(x)
         feat = self.S2(feat)
         feat = self.S3(feat)
         return feat
+    
 
+    def get_config(self):
+        config = super().get_config()
+        return config
 
-class StemBlock(nn.Module):
-
+@register_keras_serializable()
+class StemBlock(tf.keras.layers.Layer):
     def __init__(self):
-        super(StemBlock, self).__init__()
+        super().__init__()
         self.conv = ConvBNReLU(3, 16, 3, stride=2)
-        self.left = nn.Sequential(
+        self.left = tf.keras.Sequential([
             ConvBNReLU(16, 8, 1, stride=1, padding=0),
             ConvBNReLU(8, 16, 3, stride=2),
-        )
-        self.right = nn.MaxPool2d(
-            kernel_size=3, stride=2, padding=1, ceil_mode=False)
+        ])
+        self.right = tf.keras.layers.MaxPooling2D(pool_size=3, strides=2, padding='same')
         self.fuse = ConvBNReLU(32, 16, 3, stride=1)
 
-    def forward(self, x):
+    def call(self, x):
         feat = self.conv(x)
         feat_left = self.left(feat)
         feat_right = self.right(feat)
-        feat = torch.cat([feat_left, feat_right], dim=1)
+        feat = tf.concat([feat_left, feat_right], axis=1)
         feat = self.fuse(feat)
         return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        return config
 
-
-class CEBlock(nn.Module):
-
+@register_keras_serializable()
+class CEBlock(tf.keras.layers.Layer):
     def __init__(self):
-        super(CEBlock, self).__init__()
-        self.bn = nn.BatchNorm2d(128)
+        super().__init__()
+        self.bn = tf.keras.layers.BatchNormalization(axis=1)
         self.conv_gap = ConvBNReLU(128, 128, 1, stride=1, padding=0)
-        #TODO: in paper here is naive conv2d, no bn-relu
         self.conv_last = ConvBNReLU(128, 128, 3, stride=1)
 
-    def forward(self, x):
-        feat = torch.mean(x, dim=(2, 3), keepdim=True)
+    def call(self, x):
+        feat = tf.reduce_mean(x, axis=[1, 2], keepdims=True)
         feat = self.bn(feat)
         feat = self.conv_gap(feat)
         feat = feat + x
         feat = self.conv_last(feat)
         return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        return config
 
-
-class GELayerS1(nn.Module):
-
+@register_keras_serializable()
+class GELayerS1(tf.keras.layers.Layer):
     def __init__(self, in_chan, out_chan, exp_ratio=6):
-        super(GELayerS1, self).__init__()
+        super().__init__()
+        self.in_chan = in_chan
+        self.out_chan = out_chan
+        self.exp_ratio = exp_ratio
+        
         mid_chan = in_chan * exp_ratio
         self.conv1 = ConvBNReLU(in_chan, in_chan, 3, stride=1)
-        self.dwconv = nn.Sequential(
-            nn.Conv2d(
-                in_chan, mid_chan, kernel_size=3, stride=1,
-                padding=1, groups=in_chan, bias=False),
-            nn.BatchNorm2d(mid_chan),
-            nn.ReLU(inplace=True), # not shown in paper
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(
-                mid_chan, out_chan, kernel_size=1, stride=1,
-                padding=0, bias=False),
-            nn.BatchNorm2d(out_chan),
-        )
-        self.conv2[1].last_bn = True
-        self.relu = nn.ReLU(inplace=True)
+        self.dwconv = tf.keras.Sequential([
+            tf.keras.layers.DepthwiseConv2D(3, strides=1, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.ReLU(),
+        ])
+        self.conv2 = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(out_chan, 1, strides=1, padding='valid'),
+            tf.keras.layers.BatchNormalization(axis=1),
+        ])
+        self.relu = tf.keras.layers.ReLU()
 
-    def forward(self, x):
+    def call(self, x):
         feat = self.conv1(x)
         feat = self.dwconv(feat)
         feat = self.conv2(feat)
         feat = feat + x
         feat = self.relu(feat)
         return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'in_chan': self.in_chan,
+            'out_chan': self.out_chan,
+            'exp_ratio': self.exp_ratio,
+        })
+        return config
 
-
-class GELayerS2(nn.Module):
-
+@register_keras_serializable()
+class GELayerS2(tf.keras.layers.Layer):
     def __init__(self, in_chan, out_chan, exp_ratio=6):
-        super(GELayerS2, self).__init__()
+        super().__init__()
+        self.in_chan = in_chan
+        self.out_chan = out_chan
+        self.exp_ratio = exp_ratio
+        
         mid_chan = in_chan * exp_ratio
         self.conv1 = ConvBNReLU(in_chan, in_chan, 3, stride=1)
-        self.dwconv1 = nn.Sequential(
-            nn.Conv2d(
-                in_chan, mid_chan, kernel_size=3, stride=2,
-                padding=1, groups=in_chan, bias=False),
-            nn.BatchNorm2d(mid_chan),
-        )
-        self.dwconv2 = nn.Sequential(
-            nn.Conv2d(
-                mid_chan, mid_chan, kernel_size=3, stride=1,
-                padding=1, groups=mid_chan, bias=False),
-            nn.BatchNorm2d(mid_chan),
-            nn.ReLU(inplace=True), # not shown in paper
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(
-                mid_chan, out_chan, kernel_size=1, stride=1,
-                padding=0, bias=False),
-            nn.BatchNorm2d(out_chan),
-        )
-        self.conv2[1].last_bn = True
-        self.shortcut = nn.Sequential(
-                nn.Conv2d(
-                    in_chan, in_chan, kernel_size=3, stride=2,
-                    padding=1, groups=in_chan, bias=False),
-                nn.BatchNorm2d(in_chan),
-                nn.Conv2d(
-                    in_chan, out_chan, kernel_size=1, stride=1,
-                    padding=0, bias=False),
-                nn.BatchNorm2d(out_chan),
-        )
-        self.relu = nn.ReLU(inplace=True)
+        self.dwconv1 = tf.keras.Sequential([
+            tf.keras.layers.DepthwiseConv2D(3, strides=2, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+        ])
+        self.dwconv2 = tf.keras.Sequential([
+            tf.keras.layers.DepthwiseConv2D(3, strides=1, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.ReLU(),
+        ])
+        self.conv2 = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(out_chan, 1, strides=1, padding='valid'),
+            tf.keras.layers.BatchNormalization(axis=1),
+        ])
+        self.shortcut = tf.keras.Sequential([
+            tf.keras.layers.DepthwiseConv2D(3, strides=2, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.Conv2D(out_chan, 1, strides=1, padding='valid'),
+            tf.keras.layers.BatchNormalization(axis=1),
+        ])
+        self.relu = tf.keras.layers.ReLU()
 
-    def forward(self, x):
+    def call(self, x):
         feat = self.conv1(x)
         feat = self.dwconv1(feat)
         feat = self.dwconv2(feat)
@@ -190,295 +223,282 @@ class GELayerS2(nn.Module):
         feat = feat + shortcut
         feat = self.relu(feat)
         return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'in_chan': self.in_chan,
+            'out_chan': self.out_chan,
+            'exp_ratio': self.exp_ratio,
+        })
+        return config
 
-
-class SegmentBranch(nn.Module):
-
+@register_keras_serializable()
+class SegmentBranch(tf.keras.layers.Layer):
     def __init__(self):
-        super(SegmentBranch, self).__init__()
+        super().__init__()
         self.S1S2 = StemBlock()
-        self.S3 = nn.Sequential(
+        self.S3 = tf.keras.Sequential([
             GELayerS2(16, 32),
             GELayerS1(32, 32),
-        )
-        self.S4 = nn.Sequential(
+        ])
+        self.S4 = tf.keras.Sequential([
             GELayerS2(32, 64),
             GELayerS1(64, 64),
-        )
-        self.S5_4 = nn.Sequential(
+        ])
+        self.S5_4 = tf.keras.Sequential([
             GELayerS2(64, 128),
             GELayerS1(128, 128),
             GELayerS1(128, 128),
             GELayerS1(128, 128),
-        )
+        ])
         self.S5_5 = CEBlock()
 
-    def forward(self, x):
+    def call(self, x):
         feat2 = self.S1S2(x)
         feat3 = self.S3(feat2)
         feat4 = self.S4(feat3)
         feat5_4 = self.S5_4(feat4)
         feat5_5 = self.S5_5(feat5_4)
         return feat2, feat3, feat4, feat5_4, feat5_5
+    
 
+    def get_config(self):
+        config = super().get_config()
+        return config
 
-class BGALayer(nn.Module):
-
+@register_keras_serializable()
+class BGALayer(tf.keras.layers.Layer):
     def __init__(self):
-        super(BGALayer, self).__init__()
-        self.left1 = nn.Sequential(
-            nn.Conv2d(
-                128, 128, kernel_size=3, stride=1,
-                padding=1, groups=128, bias=False),
-            nn.BatchNorm2d(128),
-            nn.Conv2d(
-                128, 128, kernel_size=1, stride=1,
-                padding=0, bias=False),
-        )
-        self.left2 = nn.Sequential(
-            nn.Conv2d(
-                128, 128, kernel_size=3, stride=2,
-                padding=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.AvgPool2d(kernel_size=3, stride=2, padding=1, ceil_mode=False)
-        )
-        self.right1 = nn.Sequential(
-            nn.Conv2d(
-                128, 128, kernel_size=3, stride=1,
-                padding=1, bias=False),
-            nn.BatchNorm2d(128),
-        )
-        self.right2 = nn.Sequential(
-            nn.Conv2d(
-                128, 128, kernel_size=3, stride=1,
-                padding=1, groups=128, bias=False),
-            nn.BatchNorm2d(128),
-            nn.Conv2d(
-                128, 128, kernel_size=1, stride=1,
-                padding=0, bias=False),
-        )
-        self.up1 = nn.Upsample(scale_factor=4)
-        self.up2 = nn.Upsample(scale_factor=4)
-        ##TODO: does this really has no relu?
-        self.conv = nn.Sequential(
-            nn.Conv2d(
-                128, 128, kernel_size=3, stride=1,
-                padding=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True), # not shown in paper
-        )
+        super().__init__()
+        self.left1 = tf.keras.Sequential([
+            tf.keras.layers.DepthwiseConv2D(3, strides=1, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.Conv2D(128, 1, strides=1, padding='valid'),
+        ])
+        self.left2 = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(128, 3, strides=2, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.AveragePooling2D(pool_size=3, strides=2, padding='same'),
+        ])
+        self.right1 = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(128, 3, strides=1, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+        ])
+        self.right2 = tf.keras.Sequential([
+            tf.keras.layers.DepthwiseConv2D(3, strides=1, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.Conv2D(128, 1, strides=1, padding='valid'),
+        ])
+        self.up1 = tf.keras.layers.UpSampling2D(size=4)
+        self.up2 = tf.keras.layers.UpSampling2D(size=4)
+        self.conv = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(128, 3, strides=1, padding='same'),
+            tf.keras.layers.BatchNormalization(axis=1),
+            tf.keras.layers.ReLU(),
+        ])
 
-    def forward(self, x_d, x_s):
-        dsize = x_d.size()[2:]
+    def call(self, x_d, x_s):
         left1 = self.left1(x_d)
         left2 = self.left2(x_d)
         right1 = self.right1(x_s)
         right2 = self.right2(x_s)
         right1 = self.up1(right1)
-        left = left1 * torch.sigmoid(right1)
-        right = left2 * torch.sigmoid(right2)
+        left = left1 * tf.sigmoid(right1)
+        right = left2 * tf.sigmoid(right2)
         right = self.up2(right)
         out = self.conv(left + right)
         return out
+    
+    def get_config(self):
+        config = super().get_config()
+        return config
 
-
-
-class SegmentHead(nn.Module):
-
+@register_keras_serializable()
+class SegmentHead(tf.keras.layers.Layer):
     def __init__(self, in_chan, mid_chan, n_classes, up_factor=8, aux=True):
-        super(SegmentHead, self).__init__()
+        super().__init__()
+        self.in_chan = in_chan
+        self.mid_chan = mid_chan
+        self.n_classes = n_classes
+        self.aux = aux
+        self.up_factor = up_factor
+        self.dropout_rate = 0.1 # 保留比率
+        
         self.conv = ConvBNReLU(in_chan, mid_chan, 3, stride=1)
-        self.drop = nn.Dropout(0.1)
+        # self.drop = tf.keras.layers.Dropout(0.1)
+        self.drop = tf.keras.layers.SpatialDropout2D(
+            0.1, 
+            data_format='channels_first' # 强制 NCHW 格式
+        )
         self.up_factor = up_factor
 
         out_chan = n_classes
         mid_chan2 = up_factor * up_factor if aux else mid_chan
         up_factor = up_factor // 2 if aux else up_factor
-        self.conv_out = nn.Sequential(
-            nn.Sequential(
-                nn.Upsample(scale_factor=2),
-                ConvBNReLU(mid_chan, mid_chan2, 3, stride=1)
-                ) if aux else nn.Identity(),
-            nn.Conv2d(mid_chan2, out_chan, 1, 1, 0, bias=True),
-            nn.Upsample(scale_factor=up_factor, mode='bilinear', align_corners=False)
-        )
+        self.conv_out = tf.keras.Sequential([
+            tf.keras.layers.UpSampling2D(size=2) if aux else tf.keras.layers.Lambda(lambda x: x),
+            ConvBNReLU(mid_chan, mid_chan2, 3, stride=1) if aux else tf.keras.layers.Lambda(lambda x: x),
+            tf.keras.layers.Conv2D(out_chan, 1, strides=1, padding='valid'),
+            tf.keras.layers.UpSampling2D(size=up_factor, interpolation='bilinear'),
+        ])
+     
 
-    def forward(self, x):
+    def call0(self, x):
         feat = self.conv(x)
         feat = self.drop(feat)
         feat = self.conv_out(feat)
         return feat
+    
+    def call(self, x, training=False):
+        feat = self.conv(x)
+        if training and self.dropout_rate > 0:
+            feat_nhwc = tf.transpose(feat, perm=[0, 2, 3, 1])
+            feat_nhwc_dropped = tf.nn.dropout(feat_nhwc, rate=self.dropout_rate)
+            feat = tf.transpose(feat_nhwc_dropped, perm=[0, 3, 1, 2])
+            # print("Using dropout in SegmentHead")
+        
+        # feat = self.drop(feat)
+        feat = self.conv_out(feat)
+        return feat
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'in_chan': self.in_chan,
+            'mid_chan': self.mid_chan,
+            'n_classes': self.n_classes,
+            'aux': self.aux,
+            'up_factor': self.up_factor,
+            "dropout_rate": self.dropout_rate,
+        })
+        return config
 
+from line_profiler import profile
 
-class BiSeNetV2(nn.Module):
-
-    def __init__(self,args, n_classes, aux_mode='train'):
-        super(BiSeNetV2, self).__init__()
-        self.args = args
+@register_keras_serializable()
+class BiSeNetV2(tf.keras.Model):
+    def __init__(self, n_classes, proj_dim=256, aux_mode='train',**kwargs):
+        super().__init__(**kwargs) # ⬅️ Keras 元数据（name, trainable, dtype）在这里被处理
+        # self.args = args
+        self.proj_dim = proj_dim
+        self.n_classes = n_classes
         self.aux_mode = aux_mode
+        
+        
         self.detail = DetailBranch()
         self.segment = SegmentBranch()
         self.bga = BGALayer()
-
-        ## TODO: what is the number of mid chan ?
         self.head = SegmentHead(128, 1024, n_classes, up_factor=8, aux=False)
         if self.aux_mode == 'train':
             self.aux2 = SegmentHead(16, 128, n_classes, up_factor=4)
             self.aux3 = SegmentHead(32, 128, n_classes, up_factor=8)
             self.aux4 = SegmentHead(64, 128, n_classes, up_factor=16)
             self.aux5_4 = SegmentHead(128, 128, n_classes, up_factor=32)
-        self.proj_head = ProjectionHead(dim_in=128, proj_dim=self.args.proj_dim)
+        # self.proj_head = ProjectionHead(dim_in=128, proj_dim=self.args.proj_dim)
+        self.proj_head = ProjectionHead(dim_in=128, proj_dim=self.proj_dim)
 
-        self.init_weights()
-
-    def forward(self, x):
-      
-
-        size = x.size()[2:]
-        ######
-        if self.aux_mode=='eval':
-            h_,w_ = size
-            if h_%32!=0:
-                new_h = math.ceil(h_/32)*32
-                pad_h  = new_h-h_
-            else: 
-                pad_h=0
-            if w_%32!=0:
-                new_w = math.ceil(w_/32)*32
-                pad_w  = new_w-w_
-            else:
-                pad_w=0
-            
-            x = torch.nn.functional.pad(x,(0,pad_w,0,pad_h),mode='reflect')    
-        #####
+    def call(self, x, training=False):
+        size = tf.shape(x)[-2:]  # H, W
+        if self.aux_mode == 'eval':
+            h_ = size[0]
+            w_ = size[1]
+            rem_h = h_ % 32
+            rem_w = w_ % 32
+            pad_h = tf.where(rem_h == 0, 0, 32 - rem_h)
+            pad_w = tf.where(rem_w == 0, 0, 32 - rem_w)
+            paddings = [[0, 0],[0, 0], [0, pad_h], [0, pad_w]]
+            x = tf.pad(x, paddings, mode='REFLECT')
+                    
         feat_d = self.detail(x)
         feat2, feat3, feat4, feat5_4, feat_s = self.segment(x)
         feat_head = self.bga(feat_d, feat_s)
         emb = self.proj_head(feat_head)
-        logits = self.head(feat_head)
-
+        logits = self.head(feat_head, training=training)
         if self.aux_mode == 'train':
             logits_aux2 = self.aux2(feat2)
             logits_aux3 = self.aux3(feat3)
             logits_aux4 = self.aux4(feat4)
             logits_aux5_4 = self.aux5_4(feat5_4)
-            return logits,emb,logits_aux2, logits_aux3, logits_aux4, logits_aux5_4
+            return logits, emb, logits_aux2, logits_aux3, logits_aux4, logits_aux5_4
         elif self.aux_mode == 'eval':
-            logits = logits[:,:,:h_,:w_]
+            logits = logits[:, :, :h_, :w_]
             return logits,
         elif self.aux_mode == 'pred':
-            pred = logits.argmax(dim=1)
+            pred = tf.argmax(logits, axis=1)
             return pred
         else:
             raise NotImplementedError
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'proj_dim': self.proj_dim, 
+            'n_classes': self.n_classes,
+            'aux_mode': self.aux_mode,
+        })
+        return config
 
-    def init_weights(self):
-        for name, module in self.named_modules():
-            if isinstance(module, (nn.Conv2d, nn.Linear)):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out')
-                if not module.bias is None: nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.modules.batchnorm._BatchNorm):
-                if hasattr(module, 'last_bn') and module.last_bn:
-                    nn.init.zeros_(module.weight)
-                else:
-                    nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-        if not self.args.rand_init:
-            self.load_pretrain()
+    @classmethod
+    def from_config(cls, config):
+        # 1. 弹出所有自定义参数
+        proj_dim = config.pop('proj_dim')
+        n_classes = config.pop('n_classes') 
+        aux_mode = config.pop('aux_mode')
 
+        
+        # 3. 使用重建的自定义参数和剩余的 Keras 元数据 (即剩下的 **config) 重建实例
+        return cls(proj_dim=proj_dim, 
+                   n_classes=n_classes, 
+                   aux_mode=aux_mode, 
+                   **config) # ⬅️ 剩余的 config 包含 name, trainable, dtype 等
+    
 
-    def load_pretrain(self):
-        # state = modelzoo.load_url(backbone_url)
-        state = torch.load('segmentation/myseg/backbone_v2.pth')  # baidu server
-        for name, child in self.named_children():
-            if name in state.keys():
-                child.load_state_dict(state[name], strict=True)
-
-    def get_params(self):
-        def add_param_to_list(mod, wd_params, nowd_params):
-            for param in mod.parameters():
-                if param.dim() == 1:
-                    nowd_params.append(param)
-                elif param.dim() == 4:
-                    wd_params.append(param)
-                else:
-                    print(name)
-
-        wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params = [], [], [], []
-        for name, child in self.named_children():
-            if 'head' in name or 'aux' in name:
-                add_param_to_list(child, lr_mul_wd_params, lr_mul_nowd_params)
-            else:
-                add_param_to_list(child, wd_params, nowd_params)
-        return wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params
-
-class ProjectionHead(nn.Module):
-    def __init__(self, dim_in, proj_dim=256, proj='convmlp', ):
-        super(ProjectionHead, self).__init__()
-
+@register_keras_serializable()
+class ProjectionHead(tf.keras.layers.Layer):
+    def __init__(self, dim_in, proj_dim=256, proj='convmlp'):
+        super().__init__()
+        self.dim_in = dim_in   
+        self.proj_dim = proj_dim
+        self.proj = proj
+        
         if proj == 'linear':
-            self.proj = nn.Conv2d(dim_in, proj_dim, kernel_size=1)
+            self.proj = tf.keras.layers.Conv2D(proj_dim, 1)
         elif proj == 'convmlp':
-            self.proj = nn.Sequential(
-                nn.Conv2d(dim_in, dim_in, kernel_size=1),
-                nn.BatchNorm2d(dim_in),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(dim_in, proj_dim, kernel_size=1)
-            )
-    def forward(self, x):
-        return F.normalize(self.proj(x), p=2, dim=1)
+            self.proj = tf.keras.Sequential([
+                tf.keras.layers.Conv2D(dim_in, 1),
+                tf.keras.layers.BatchNormalization(axis=1),
+                tf.keras.layers.ReLU(),
+                tf.keras.layers.Conv2D(proj_dim, 1)
+            ])
+    def call(self, x):
+        x = self.proj(x)
+        x = tf.nn.l2_normalize(x, axis=1)
+        return x
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'dim_in': self.dim_in,
+            'proj_dim': self.proj_dim,
+            'proj': self.proj,
+        })
+        return config
 
-
-
+# 测试代码部分已注释
 if __name__ == "__main__":
-    #  x = torch.randn(16, 3, 1024, 2048)
-    #  detail = DetailBranch()
-    #  feat = detail(x)
-    #  print('detail', feat.size())
-    #
-    #  x = torch.randn(16, 3, 1024, 2048)
-    #  stem = StemBlock()
-    #  feat = stem(x)
-    #  print('stem', feat.size())
-    #
-    #  x = torch.randn(16, 128, 16, 32)
-    #  ceb = CEBlock()
-    #  feat = ceb(x)
-    #  print(feat.size())
-    #
-    #  x = torch.randn(16, 32, 16, 32)
-    #  ge1 = GELayerS1(32, 32)
-    #  feat = ge1(x)
-    #  print(feat.size())
-    #
-    #  x = torch.randn(16, 16, 16, 32)
-    #  ge2 = GELayerS2(16, 32)
-    #  feat = ge2(x)
-    #  print(feat.size())
-    #
-    #  left = torch.randn(16, 128, 64, 128)
-    #  right = torch.randn(16, 128, 16, 32)
-    #  bga = BGALayer()
-    #  feat = bga(left, right)
-    #  print(feat.size())
-    #
-    #  x = torch.randn(16, 128, 64, 128)
-    #  head = SegmentHead(128, 128, 19)
-    #  logits = head(x)
-    #  print(logits.size())
-    #
-    #  x = torch.randn(16, 3, 1024, 2048)
-    #  segment = SegmentBranch()
-    #  feat = segment(x)[0]
-    #  print(feat.size())
-    #
-    x = torch.randn(16, 3, 1024, 2048)
-    model = BiSeNetV2(n_classes=19)
-    outs = model(x)
-    for out in outs:
-        print(out.size())
-    #  print(logits.size())
-
-    #  for name, param in model.named_parameters():
-    #      if len(param.size()) == 1:
-    #          print(name)
+    from argparse import Namespace
+    from tqdm import tqdm
+    args = Namespace()
+    args.proj_dim = 256
+    x = tf.random.normal([16, 3, 366, 500])
+    # model = BiSeNetV2(args, n_classes=20, aux_mode='train')
+    model = BiSeNetV2(args, n_classes=20, aux_mode='eval')
+    for i in tqdm(range(10000)):
+        out = model(x)
+    print("Output shapes:")
+    for o in out:
+        print(o.shape)
+    
+    
+    

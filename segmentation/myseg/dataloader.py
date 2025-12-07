@@ -2,16 +2,16 @@ import os
 
 import cv2
 import numpy as np
-import torch
-import torchvision
-import torch.distributed as dist
+# import torch
+# import torchvision
+# import torch.distributed as dist
 from collections import OrderedDict
 import myseg.tv_transform as my_transforms
 import myseg.cv2_transform as cv2_transforms
+import tensorflow as tf
 
 # 数据集根路径
 # root_dir = '../data/cityscapes'
-
 
 def read_images_dir(root_dir, folder, is_label=False):
     """
@@ -42,10 +42,7 @@ def read_images_dir(root_dir, folder, is_label=False):
     img_dirs = sorted(img_dirs)
     return img_dirs
 
-
-
-
-class Cityscapes_Dataset(torch.utils.data.Dataset):
+class Cityscapes_Dataset:
     """Cityscapes dataset"""
 
     # Training dataset root folders
@@ -124,11 +121,7 @@ class Cityscapes_Dataset(torch.utils.data.Dataset):
         assert len(self.image_dirs) == len(self.label_dirs), '图像和标注数量不匹配'
         print('find ' + str(len(self.image_dirs)) + ' examples')
 
-
-
     def __getitem__(self, idx):
-
-
         # 读入图片
         image = cv2.imread(self.image_dirs[idx], cv2.IMREAD_COLOR)[:, :, ::-1]
         label = cv2.imread(self.label_dirs[idx], cv2.IMREAD_GRAYSCALE)
@@ -166,7 +159,6 @@ class Cityscapes_Dataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.image_dirs)
 
-
 def load_dataiter(root_dir, batch_size, use_DDP=False):
     """加载dataloader"""
     num_workers = 16
@@ -175,23 +167,32 @@ def load_dataiter(root_dir, batch_size, use_DDP=False):
     train_set = Cityscapes_Dataset(root_dir, 'train')
     test_set = Cityscapes_Dataset(root_dir, 'val')
 
-    if use_DDP:
-        # DDP：使用DistributedSampler，DDP帮我们把细节都封装起来了。
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
-        # test_sampler = torch.utils.data.distributed.DistributedSampler(test_set)
-
-        train_iter = torch.utils.data.DataLoader(
-            train_set, batch_size, shuffle=False, drop_last=True, num_workers=num_workers, sampler=train_sampler)
-        test_iter = torch.utils.data.DataLoader(
-            test_set, batch_size, drop_last=True, num_workers=num_workers)
-    else:
-        train_iter = torch.utils.data.DataLoader(
-            train_set, batch_size, shuffle=True, drop_last=True, num_workers=num_workers)
-        test_iter = torch.utils.data.DataLoader(
-            test_set, batch_size, drop_last=True, num_workers=num_workers)
+    # 不再使用 torch DataLoader
+    train_iter = SimpleDataLoader(train_set, batch_size, shuffle=True)
+    test_iter = SimpleDataLoader(test_set, batch_size, shuffle=False)
 
     return train_iter, test_iter
 
+class SimpleDataLoader:
+    def __init__(self, dataset, batch_size=1, shuffle=False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.indices = np.arange(len(dataset))
+
+    def __iter__(self):
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+        for start_idx in range(0, len(self.indices), self.batch_size):
+            batch_indices = self.indices[start_idx:start_idx + self.batch_size]
+            batch = [self.dataset[idx] for idx in batch_indices]
+            images, labels = zip(*batch)
+            images = np.stack([np.array(img) for img in images])
+            labels = np.stack([np.array(lb) for lb in labels])
+            yield images, labels
+
+    def __len__(self):
+        return int(np.ceil(len(self.dataset) / self.batch_size))
 
 if __name__ == '__main__':
 
@@ -205,6 +206,6 @@ if __name__ == '__main__':
     print("test_iter.len", len(test_iter))
     for i, (images, labels) in enumerate(train_iter):
         if (i < 3):
-            print(images.size(), labels.size())  # torch.Size([16, 3, 512, 1024]) torch.Size([16, 512, 1024])
+            print(images.shape, labels.shape)
             print(labels.dtype)
             print(labels[0, 245:255, 250:260])

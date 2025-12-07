@@ -5,7 +5,7 @@ date_now=$(date +"%Y%m%d_%H%M%S")
 #ROOT_DIR='../data/cityscapes'
 #ROOT_DIR='../data/cityscapes_split_erase19'
 #ROOT_DIR='../data/cityscapes_split_erase19C2'
-ROOT_DIR='../voc'
+ROOT_DIR='./data/voc'
 #ROOT_DIR='../data/ade20k_erase_150C1'
 
 LABEL_ONLINE_GEN=False
@@ -44,8 +44,11 @@ CON_LAMB_LOCAL=1
 ##################
 DATASET=voc #cityscapes #ade20k  #camvid
 NUM_CLS=20
-NUM_USERS=60
+# NUM_USERS=60
+NUM_USERS=20
 
+
+# kernprof -l segmentation/federated_main.py \
 python -u segmentation/federated_main.py \
 --gpu="0" \
 --dataset=$DATASET \
@@ -89,9 +92,9 @@ python -u segmentation/federated_main.py \
 --mom_update=$MOM_UPDATE \
 --save_frequency=20 \
 --local_test_frequency=9999 \
---global_test_frequency=20 \
+--global_test_frequency=1 \
 --USE_WANDB=0 \
 --date_now=${date_now} \
-| tee -a "save/logs/log-${date_now}.txt"
+2>&1 | tee -a "save/logs/log-${date_now}.txt"
 
 

@@ -1,8 +1,10 @@
 import time
 import warnings
 
-import torch
-from torch.utils.data import DataLoader
+import numpy as np
+# import torch
+# from torch.utils.data import DataLoader
+import tensorflow as tf
 
 from myseg.dataloader import Cityscapes_Dataset
 from myseg.datasplit import get_dataset_cityscapes
@@ -75,8 +77,16 @@ if __name__ == '__main__':
     else:
         exit('Error: unrecognized dataset')
 
-    test_loader = DataLoader(test_dataset, batch_size=4, num_workers=args.num_workers, shuffle=False,
-                             pin_memory=True)  # for global model test
+    # TensorFlow 2 DataLoader 替换
+    def tf_data_generator(dataset, batch_size):
+        for i in range(0, len(dataset), batch_size):
+            images, targets = [], []
+            for j in range(i, min(i + batch_size, len(dataset))):
+                img, tgt = dataset[j]
+                images.append(img)
+                targets.append(tgt)
+            yield np.stack(images), np.stack(targets)
+    test_loader = tf_data_generator(test_dataset, batch_size=4)
 
     # BUILD MODEL
     global_model = make_model(args)
@@ -88,7 +98,7 @@ if __name__ == '__main__':
     # exit()
 
     # Set the model to train and send it to device.
-    global_model.to(device)
+    # global_model.to(device)  # TensorFlow模型无需to(device)
 
     # resume from checkpoint
     # args.checkpoint = "fed_train_bisenetv2_c19_e1500_frac[0.035]_iid[1]_E[2]_B[8]_lr[0.05]_acti[relu]_users[144]_opti[sgd]_sche[lambda].pth"
