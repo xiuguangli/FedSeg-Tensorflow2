@@ -44,8 +44,8 @@ CON_LAMB_LOCAL=1
 ##################
 DATASET=voc #cityscapes #ade20k  #camvid
 NUM_CLS=20
-# NUM_USERS=60
-NUM_USERS=20
+NUM_USERS=60
+# NUM_USERS=20
 
 
 # kernprof -l segmentation/federated_main.py \
@@ -95,6 +95,7 @@ python -u segmentation/federated_main.py \
 --global_test_frequency=1 \
 --USE_WANDB=0 \
 --date_now=${date_now} \
-2>&1 | tee -a "save/logs/log-${date_now}.txt"
+ | tee -a "save/logs/log-${date_now}.txt"
+# 2>&1 | tee -a "save/logs/log-${date_now}.txt"
 
 

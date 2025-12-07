@@ -239,8 +239,8 @@ class LocalUpdate(object):
 
         # import time
         # s0 = time.time()
-        # for batch_idx, (images, labels) in enumerate(tqdm(self.trainloader_eval,desc="Extracting prototypes",leave=False)):
-        for batch_idx, (images, labels) in enumerate(self.trainloader_eval):
+        for batch_idx, (images, labels) in enumerate(tqdm(self.trainloader_eval,desc="Extracting prototypes",leave=False)):
+        # for batch_idx, (images, labels) in enumerate(self.trainloader_eval):
             out, labels_final = get_protos_inner(images, labels)
             tmp_.append(out)
             unique_l = np.unique(labels_final.numpy()).tolist()
@@ -397,9 +397,10 @@ class LocalUpdate(object):
             batch_loss = []
             t0 = time.time()
             # 假设 self.trainloader 是一个 tf.data.Dataset 或 可迭代对象
-            for batch_idx, (images, labels) in enumerate(self.trainloader):                
+            # for batch_idx, (images, labels) in enumerate(self.trainloader):                
+            for batch_idx, (images, labels) in enumerate(tqdm(self.trainloader, desc="Training", leave=False)):                
                 optimizer.learning_rate.assign(args.lr)
-                print(f"shape: images: {images.shape}, labels: {labels.shape}")
+                # print(f"shape: images: {images.shape}, labels: {labels.shape}")
                 with tf.GradientTape() as tape:
                     # loss,logits, feat_head, logits_aux, labels_, loss_ce, loss_con_item, loss_con_2_item, loss_1_item, loss_pi_item, loss_pa_item = loss_fn(images, labels)
                     
@@ -572,8 +573,8 @@ class LocalUpdate(object):
                 batch_loss.append(float(loss))
 
                 # 打印学习率
-                current_lr = float(optimizer.learning_rate)
-                print("Local Epoch: {}, batch_idx: {}, lr: {:.3e}".format(iter_epoch, batch_idx, current_lr))
+                # current_lr = float(optimizer.learning_rate)
+                # print("Local Epoch: {}, batch_idx: {}, lr: {:.3e}".format(iter_epoch, batch_idx, current_lr))
                 
                 # lr_scheduler.step() Logic handled manually above via optimizer.learning_rate.assign
                 # break

@@ -19,11 +19,11 @@ def evaluate(model, data_loader, num_classes):
         confmat.update(tf.reshape(target, [-1]), tf.reshape(tf.argmax(output, axis=1), [-1]))
         # return confmat
 
-    # for image, target in tqdm(data_loader,desc="Evaluating", leave=False):
-    for image, target in data_loader:
+    for image, target in tqdm(data_loader,desc="Evaluating", leave=False):
+    # for image, target in data_loader:
         # output = model(image, training=False)
         model_inference(image, target)
-        break
+        # break
     
     model.aux_mode = 'train'
     confmat.compute()
