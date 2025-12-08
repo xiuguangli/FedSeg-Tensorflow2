@@ -22,10 +22,15 @@ ADE20k: 链接: https://pan.baidu.com/s/13ypIWZFCa58oZT7cA3KWNA  密码: tps2
 
 Put the downloaded datasets into the folder 'data'
 
+```text
 data
-  └── voc
-        ├── images
-        └── labels
+├── cityscapes
+│   ├── gtFine_trainvaltest
+│   └── leftImg8bit_trainvaltest
+└── VOC
+    ├── images
+    └── labels
+```
 
 ```
 sh run_voc.sh
